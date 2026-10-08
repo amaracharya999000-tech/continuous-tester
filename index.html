@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Continuous Bandwidth Tester</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0b1020;color:#eef2ff;min-height:100vh;display:grid;place-items:center}
+.card{width:min(720px,92vw);background:#151c32;border:1px solid #293451;border-radius:22px;padding:28px;box-shadow:0 20px 60px #0006}
+h1{margin:0 0 8px;font-size:28px}.sub{color:#aab4cf;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.stat{background:#0e1528;border-radius:16px;padding:18px}.label{color:#98a5c3;font-size:13px}.value{font-size:28px;font-weight:700;margin-top:6px}
+.controls{display:flex;gap:10px;margin:20px 0}.controls button{flex:1;padding:14px;border:0;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer}.start{background:#5eead4;color:#06231f}.stop{background:#fb7185;color:#31070d}.stop:disabled,.start:disabled{opacity:.45;cursor:not-allowed}
+.bar{height:10px;background:#0a1020;border-radius:99px;overflow:hidden;margin:16px 0}.fill{height:100%;width:0%;background:#5eead4;transition:width .2s}
+canvas{width:100%;height:180px;background:#0e1528;border-radius:16px;margin-top:8px}
+.note{font-size:12px;line-height:1.5;color:#8995b2;margin-top:18px}
+@media(max-width:560px){.grid{grid-template-columns:1fr}.value{font-size:24px}}
+</style>
+</head>
+<body>
+<main class="card">
+<h1>Continuous Bandwidth Tester</h1>
+<div class="sub">Disposable-data internet stress test</div>
+
+<div class="grid">
+  <div class="stat"><div class="label">Current download</div><div class="value" id="down">0.00 Mbps</div></div>
+  <div class="stat"><div class="label">Current upload</div><div class="value" id="up">0.00 Mbps</div></div>
+  <div class="stat"><div class="label">Downloaded</div><div class="value" id="downTotal">0 B</div></div>
+  <div class="stat"><div class="label">Uploaded</div><div class="value" id="upTotal">0 B</div></div>
+  <div class="stat"><div class="label">Total transferred</div><div class="value" id="total">0 B</div></div>
+  <div class="stat"><div class="label">Elapsed</div><div class="value" id="elapsed">00:00:00</div></div>
+</div>
+
+<div class="controls">
+  <button class="start" id="start">Start test</button>
+  <button class="stop" id="stop" disabled>Stop</button>
+</div>
+
+<div class="bar"><div class="fill" id="fill"></div></div>
+<canvas id="chart" width="1200" height="300"></canvas>
+
+<div class="note">
+This test transfers disposable random bytes between your browser and the test server.
+The data is not meant to be saved. Because the bytes travel over your connection,
+your ISP/mobile carrier can still count them toward your data allowance.
+</div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const state={running:false,down:0,up:0,started:0,lastDown:0,lastUp:0,samples:[],controllers:[]};
+
+function fmtBytes(n){
+  const u=["B","KB","MB","GB","TB"]; let i=0;
+  while(n>=1024&&i<u.length-1){n/=1024;i++}
+  return n.toFixed(i?2:0)+" "+u[i];
+}
+function fmtTime(ms){
+  let s=Math.floor(ms/1000),h=Math.floor(s/3600);s%=3600;
+  let m=Math.floor(s/60);s%=60;
+  return [h,m,s].map((x,i)=>i===0?String(x).padStart(2,"0"):String(x).padStart(2,"0")).join(":");
+}
+function draw(){
+  const c=$("chart"),x=c.getContext("2d"),w=c.width,h=c.height;
+  x.clearRect(0,0,w,h); x.strokeStyle="#293451"; x.lineWidth=2;
+  for(let i=1;i<5;i++){x.beginPath();x.moveTo(0,i*h/5);x.lineTo(w,i*h/5);x.stroke()}
+  const a=state.samples;if(a.length<2)return;
+  const max=Math.max(1,...a);
+  x.beginPath();x.lineWidth=5;
+  a.forEach((v,i)=>{const px=i*(w-20)/(a.length-1)+10,py=h-10-(v/max)*(h-20);i?x.lineTo(px,py):x.moveTo(px,py)});
+  x.stroke();
+}
+async function downloadLoop(){
+  while(state.running){
+    const t=performance.now();
+    try{
+      // Server endpoint streams disposable random bytes and never stores them.
+      const r=await fetch("/api/download?bytes=10485760&x="+Math.random(),{cache:"no-store"});
+      if(!r.ok) throw new Error("download "+r.status);
+      const reader=r.body.getReader(); let n=0;
+      while(state.running){
+        const {done,value}=await reader.read(); if(done)break;
+        n+=value.byteLength; state.down+=value.byteLength;
+        const dt=(performance.now()-t)/1000;
+        if(dt>0) $("down").textContent=((n*8/dt)/1e6).toFixed(2)+" Mbps";
+        $("downTotal").textContent=fmtBytes(state.down);
+        $("total").textContent=fmtBytes(state.down+state.up);
+      }
+      reader.cancel().catch(()=>{});
+    }catch(e){ if(state.running) console.error(e); await new Promise(r=>setTimeout(r,300)); }
+  }
+}
+function randomBuffer(size){const b=new Uint8Array(size);crypto.getRandomValues(b);return b}
+async function uploadLoop(){
+  while(state.running){
+    try{
+      const b=randomBuffer(1024*1024), t=performance.now();
+      const r=await fetch("/api/upload?x="+Math.random(),{
+        method:"POST",body:b,cache:"no-store",headers:{"Content-Type":"application/octet-stream"}
+      });
+      if(!r.ok) throw new Error("upload "+r.status);
+      state.up+=b.byteLength;
+      const dt=Math.max(.001,(performance.now()-t)/1000);
+      $("up").textContent=((b.byteLength*8/dt)/1e6).toFixed(2)+" Mbps";
+      $("upTotal").textContent=fmtBytes(state.up);
+      $("total").textContent=fmtBytes(state.down+state.up);
+    }catch(e){if(state.running)console.error(e)}
+  }
+}
+let timer;
+function tick(){
+  if(!state.running)return;
+  $("elapsed").textContent=fmtTime(performance.now()-state.started);
+  state.samples.push(parseFloat($("down").textContent)||0);
+  if(state.samples.length>80)state.samples.shift();
+  draw();
+  $("fill").style.width=(state.samples.length/80*100)+"%";
+  timer=requestAnimationFrame(tick);
+}
+$("start").onclick=()=>{
+  state.running=true;state.down=0;state.up=0;state.started=performance.now();state.samples=[];
+  $("start").disabled=true;$("stop").disabled=false;
+  downloadLoop();uploadLoop();tick();
+};
+$("stop").onclick=()=>{
+  state.running=false;$("start").disabled=false;$("stop").disabled=true;
+  state.controllers.forEach(c=>c.abort?.());state.controllers=[];
+  cancelAnimationFrame(timer);
+};
+</script>
+</body>
+</html>
